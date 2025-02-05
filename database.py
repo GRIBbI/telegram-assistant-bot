@@ -1,48 +1,21 @@
 import os
-import logging
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
+from datetime import datetime
 
-# Настраиваем логирование
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+DATABASE_URL = "sqlite:///database.db"
 
-# Читаем URL базы данных
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///database.db")
-
-# Исправляем URL для PostgreSQL, если нужно
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
-
-# Подключение к базе данных
-try:
-    engine = create_engine(DATABASE_URL, echo=False, future=True)
-    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
-    logger.info("✅ Подключение к базе данных успешно!")
-except SQLAlchemyError as e:
-    logger.error(f"❌ Ошибка подключения к базе данных: {e}")
-    exit(1)
-
-# Определение базы
+engine = create_engine(DATABASE_URL, echo=False)
 Base = declarative_base()
+SessionLocal = sessionmaker(bind=engine)
 
-# Модель Task
 class Task(Base):
     __tablename__ = "tasks"
-    
+
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
-    description = Column(String, nullable=True)
+    deadline = Column(DateTime, nullable=True)  # ✅ Исправлено: Добавлен дедлайн
 
-# Функция для создания таблиц
 def init_db():
-    """Создает таблицы в базе данных."""
-    try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("✅ Таблицы успешно созданы!")
-    except SQLAlchemyError as e:
-        logger.error(f"❌ Ошибка создания таблиц: {e}")
-
-# Инициализируем базу при запуске
-init_db()
+    """Создаём таблицы в БД"""
+    Base.metadata.create_all(bind=engine)
