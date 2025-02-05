@@ -1,13 +1,13 @@
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
-from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, ForceReply
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from telegram_bot_calendar import DetailedTelegramCalendar
+from telegram_bot_calendar import DetailedTelegramCalendar, LSTEP
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.background import BackgroundScheduler
-from database import SessionLocal, Task
+from database import SessionLocal, Task, init_db
 
 # 🔹 Включаем логирование
 logging.basicConfig(level=logging.INFO)
@@ -24,25 +24,8 @@ if not TELEGRAM_BOT_TOKEN:
 # 🎛 Главное меню
 MAIN_MENU = ReplyKeyboardMarkup(
     [
-        ["➕ Добавить задачу", "📋 Список задач"],
+        ["Добавить задачу", "Список задач"],
         ["⏰ Уведомления"]
-    ],
-    resize_keyboard=True
-)
-
-# 🎛 Меню при просмотре задач
-TASKS_MENU = ReplyKeyboardMarkup(
-    [
-        ["❌ Удалить задачу", "🗑 Очистить все"],
-        ["🔙 Назад"]
-    ],
-    resize_keyboard=True
-)
-
-# 🎛 Меню при добавлении задачи
-ADD_TASK_MENU = ReplyKeyboardMarkup(
-    [
-        ["⏩ Пропустить описание"]
     ],
     resize_keyboard=True
 )
@@ -51,114 +34,103 @@ ADD_TASK_MENU = ReplyKeyboardMarkup(
 scheduler = BackgroundScheduler()
 scheduler.start()
 
+# 🔹 Инициализация БД
+init_db()
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Стартовое сообщение"""
     logger.info(f"✅ Команда /start вызвана | update_id: {update.update_id}")
     context.user_data.clear()
     await update.message.reply_text("👋 Привет! Я бот-менеджер задач. Выберите действие:", reply_markup=MAIN_MENU)
 
+async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает команды из главного меню"""
+    user_text = update.message.text.strip().lower()
+    logger.info(f"📩 Пользователь выбрал: {user_text}")
+
+    if user_text == "добавить задачу":
+        context.user_data["action"] = "adding_task_title"
+        logger.info(f"📌 Состояние изменено: {context.user_data['action']}")
+        await update.message.reply_text("✏️ Введите название задачи:")
+
+    elif user_text == "список задач":
+        await update.message.reply_text("📜 Ваши задачи: (Здесь пока пусто)")
+
+    elif user_text == "уведомления":
+        await update.message.reply_text("🔔 Здесь будут показываться уведомления!")
+
+    else:
+        await update.message.reply_text("⚠️ Я не понимаю эту команду. Выберите действие из меню.", reply_markup=MAIN_MENU)
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает текстовые сообщения"""
+    """Обрабатывает ввод пользователя (название задачи, описание, кастомное время и т.д.)"""
     user_text = update.message.text.strip()
     action = context.user_data.get("action")
 
-    logger.info(f"📝 Получено сообщение: {user_text} | Действие: {action}")
+    logger.info(f"📝 Введён текст: {user_text} | Текущий action: {action}")
 
-    # 🟢 Если пользователь НЕ находится в режиме ввода задачи, перенаправляем в `handle_menu`
-    if not action:
-        await handle_menu(update, context)
-        return
-
-    # 🚨 Блокируем кнопки в заголовке и описании задачи
-    if user_text in ["➕ Добавить задачу", "📋 Список задач", "⏰ Уведомления", "❌ Удалить задачу", "🗑 Очистить все", "🔙 Назад"]:
-        await update.message.reply_text("⚠️ Используйте меню для выбора действия.")
-        return
-
-    # 🟢 Ожидаем заголовок задачи
     if action == "adding_task_title":
         context.user_data["new_task_title"] = user_text
         context.user_data["action"] = "adding_task_description"
-        await update.message.reply_text("📝 Введите описание задачи (или нажмите '⏩ Пропустить')", reply_markup=ADD_TASK_MENU)
+        logger.info(f"📌 Название задачи сохранено: {user_text}")
+        await update.message.reply_text("📝 Введите описание задачи (или нажмите '⏩ Пропустить')", 
+                                        reply_markup=ReplyKeyboardMarkup([["⏩ Пропустить"]], resize_keyboard=True))
 
-    # 🟢 Ожидаем описание задачи
     elif action == "adding_task_description":
-        if user_text == "⏩ Пропустить":
-            context.user_data["new_task_description"] = None
-        else:
-            context.user_data["new_task_description"] = user_text
-
+        context.user_data["new_task_description"] = None if user_text == "⏩ Пропустить" else user_text
         context.user_data["action"] = "adding_task_deadline"
         await send_calendar(update, context)
 
-async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команды из меню"""
-    user_text = update.message.text.strip()
+    elif action == "adding_custom_time":
+        try:
+            deadline_date = context.user_data.get("deadline_date")
+            if not deadline_date:
+                logger.error("❌ Ошибка: дата дедлайна не найдена!")
+                await update.message.reply_text("⚠️ Ошибка! Дата не найдена. Попробуйте заново.")
+                return
 
-    logger.info(f"📩 Меню выбрано: {user_text}")
-
-    if user_text == "➕ Добавить задачу":
-        context.user_data["action"] = "adding_task_title"
-        await update.message.reply_text("✏️ Введите название задачи:")
-
-    elif user_text == "📋 Список задач":
-        await list_tasks(update, context)
-
-    elif user_text == "❌ Удалить задачу":
-        await delete_task(update, context)
-
-    elif user_text == "🗑 Очистить все":
-        await clear_all_tasks(update, context)
-
-    elif user_text == "🔙 Назад":
-        await update.message.reply_text("🔙 Возвращаемся в главное меню", reply_markup=MAIN_MENU)
+            deadline = datetime.combine(deadline_date, datetime.strptime(user_text, "%H:%M").time())
+            await save_task(update, context, deadline)
+        except ValueError:
+            await update.message.reply_text("⚠️ Ошибка! Введите время в формате ЧЧ:ММ (например, 14:30)")
 
 async def send_calendar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправляет календарь Telegram для выбора даты"""
     calendar, step = DetailedTelegramCalendar().build()
-    await update.message.reply_text(f"📆 Выберите дату дедлайна:", reply_markup=calendar)
+    await update.message.reply_text(f"📆 Выберите {LSTEP[step]}:", reply_markup=calendar)
 
-async def calendar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает нажатие на календарь"""
+async def time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает нажатие на выбор времени"""
     query = update.callback_query
-    result, key, step = DetailedTelegramCalendar().process(query.data)
+    await query.answer()
 
-    if not result and key:
-        await query.message.edit_text(f"📆 Выберите дату дедлайна:", reply_markup=key)
-    elif result:
-        deadline = datetime.strptime(str(result), "%Y-%m-%d")
+    logger.info(f"⏰ Callback получен: {query.data}")
+
+    if query.data == "custom_time":
+        context.user_data["action"] = "adding_custom_time"
+        await query.message.reply_text("⌛ Введите своё время в формате ЧЧ:ММ (например, 14:30)", reply_markup=ForceReply())
+    else:
+        selected_time = query.data.split("_")[1]
+        deadline_date = context.user_data.get("deadline_date")
+
+        if not deadline_date:
+            logger.error("❌ Ошибка: дата дедлайна не найдена!")
+            await query.message.reply_text("⚠️ Ошибка! Дата не найдена. Попробуйте заново.")
+            return
+
+        deadline = datetime.combine(deadline_date, datetime.strptime(selected_time, "%H:%M").time())
+
+        await query.message.edit_text(f"⏳ Время выбрано: {selected_time} ✅")
         await save_task(update, context, deadline)
-
-async def save_task(update: Update, context: ContextTypes.DEFAULT_TYPE, deadline):
-    """Сохраняем задачу в базу данных"""
-    title = context.user_data.get("new_task_title", "Без названия")
-    details = context.user_data.get("new_task_description", None)
-
-    with SessionLocal() as db:
-        new_task = Task(title=title, details=details, deadline=deadline)
-        db.add(new_task)
-        db.commit()
-
-    task_info = f"✅ Задача добавлена:\n📌 *{title}*" + (f"\n📝 {details}" if details else "") + (f"\n⏳ {deadline.strftime('%d.%m.%Y')}" if deadline else "")
-
-    await update.message.reply_text(task_info, reply_markup=MAIN_MENU, parse_mode="Markdown")
-
-    # Запланировать уведомление
-    if deadline:
-        scheduler.add_job(send_reminder, "date", run_date=deadline, args=[update, context, title])
-
-    context.user_data.clear()
-
-async def send_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE, task_title):
-    """Отправляет уведомление о дедлайне"""
-    await update.message.reply_text(f"⏰ Напоминание! Время выполнить задачу: *{task_title}*", parse_mode="Markdown")
 
 def main():
     """Запускает Telegram-бота"""
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(calendar_callback))
+    application.add_handler(MessageHandler(filters.Regex("^(Добавить задачу|Список задач|⏰ Уведомления)$"), handle_menu))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(time_callback, pattern="^time_[0-9]{2}:[0-9]{2}|custom_time"))
 
     application.run_polling()
 
